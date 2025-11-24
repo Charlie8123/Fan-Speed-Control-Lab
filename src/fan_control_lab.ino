@@ -1,18 +1,7 @@
 /**************************************************************************************************
 *                 UNIVERSITY OF BATH ELECTRONIC & ELECTRICAL ENGINEERING DEPARTMENT
 *
-* File: fan_control.ino - Software Version 1.0.0
-* Device: Arduino Nano ESP32
-* Created on: 16 September 2025, 13:46
-* Last updated: 07 October 2025, 10:42
-* Author: Richmond Afeawo
-*
-* Description: This code makes use of the fan drive interface boards as part of the Year 3 Fan
-* Control lab in the EE Department.
-* It makes use of a rotary encoder as an input to adjust the target speed of the fan.
-* The built-in tachometer on the fan is used to measure the actual fan speed.
-* There is no feedback in this system, so the PWM output remains fixed even when external factors
-* require a change in the fan speed
+* Group 15 - Fan Control Lab
 *
 * Notes: - 12V is supplied to the fan drive interface board
 *        - 3V3 for the interface board is provided from the Arduino
@@ -24,15 +13,18 @@
 #include <PID_v1.h>
 
 // control vars
-double rpm, rpm_pwm, setpoint, output;
+double rpm, rpm_pwm, setpoint, output, fan_voltage;
 // PID Tunings — start with these and tune later
-double Kp = 2.5;
-double Ki = 0.0;
-double Kd = 0.0;
+double Kp = 12.0;
+double Ki = 0.4;
+double Kd = 0;
 // PID internal state
 double pidIntegral = 0;
 double pidPrevError = 0;
 unsigned long pidPrevTime = 0;
+
+double pidOut = 0;
+unsigned long lastPID = 0;
 
 // PWM output and fan tacho input pins
 const int PWM_OUT = 2;
@@ -45,6 +37,7 @@ const int ROT_IN_2 = 5;
 // Measured maximum and minimum fan speeds
 const long MIN_RPM = 660;
 const long MAX_RPM = 1940;
+const double MAX_VOLTAGE = 12000;
 
 // Maximum and minimum period from fan's tachometer
 const long MIN_PERIOD = 14500;
@@ -65,6 +58,10 @@ void setup() {
   // Initialize serial comms:
   Serial.begin(9600);
 
+  period = 0;
+
+  Serial.println("t,setpoint_rpm,rpm,output_pwm,fan_voltage");
+
   // Set pin properties
   pinMode(PWM_OUT, OUTPUT);
   pinMode(TACHO_IN, INPUT_PULLUP);
@@ -77,49 +74,62 @@ void setup() {
   
   // Start fan off at initial speed
   analogWrite(PWM_OUT, 1);
-  delay(500); // Delay to allow fan time to start up
+  //delay(500); // Delay to allow fan time to start up
 }
 
 // Main code to run continuously
 void loop() {
-  // Measure fan speed from tachometer
+  // Measure fan speed
+
+  // Make exp curve to represent the nonlinear relationship between RMP and PWM
   checkPeriod();
 
   // Convert tachometer period to RPM
   const int PULSES_PER_REV = 2;
   double rpm = 0;
   if (period > 0) rpm = 60000000.0 / (period * PULSES_PER_REV);
-  //input = rpm;
 
-  // Update PID setpoint from encoder
-  noInterrupts();
-  setpoint = encoderPos;
-  interrupts();
+  // ----- STEP INPUT -----
+  // Step occurs at 5000 ms
+  unsigned long t = millis();
+  if (t < 5000) setpoint = 0;     // initial level (pre-step)
+  if (t < 5000) rpm = 0;     // initial level (pre-step)
+  else setpoint = 155;             // post-step target
+  // -----------------------
 
-  // Convert setpoint to RMP
-  rpm_pwm = map(rpm, MIN_RPM, MAX_RPM, 1, 255);
+  // Convert measurement to PWM scale used by your PID
+  double setpoint_rpm = PWMtoRPM(setpoint);
 
-  // Compute PID
-  double pidOut = computePID(setpoint, rpm_pwm);
+  // Compute PID output
+  const unsigned long PID_INTERVAL = 10000; // 10 ms
 
-  // Constrain to PWM range
-  pidOut = constrain(pidOut, 0, 255);
-  output = pidOut;
-  
-  static unsigned long lastPrint = 0; // Keep track of when data was last printed to Serial
+  if (micros() - lastPID >= PID_INTERVAL) {
+      lastPID += PID_INTERVAL;
+      pidOut = computePID(setpoint_rpm, rpm);
+  }
+  //Serial.print(setpoint_rpm); Serial.print(",");
+  //Serial.println(pidOut);
 
-  // Update outputs every 100ms
-  if (millis() - lastPrint >= 100) {
+  output = setpoint_rpm + pidOut;
+  output = RPMtoPWM(output);
+  // Compute equivalent fan voltage (mV)
+  fan_voltage = MAX_VOLTAGE * (output / 255.0);
+
+  static unsigned long lastPrint = 0;
+
+  // Print every 100 ms
+  if (t - lastPrint >= 100) {
 #ifdef DEBUG
-    Serial.print("Setpoint:"); Serial.print(setpoint);
-    Serial.print(",Output:");  Serial.print(output);
-    //Serial.print(",Period:");  Serial.print(period);
-    Serial.print(",RPM:");  Serial.print(rpm);
-    Serial.print(",RPM_PWM:");  Serial.println(rpm_pwm);
-#endif   
-    lastPrint = millis();
- 
-    // Update PWM Output
+    Serial.print(t);       Serial.print(",");
+    Serial.print(setpoint_rpm); Serial.print(",");
+    Serial.print(rpm);      Serial.print(",");
+    Serial.print(output);   Serial.print(",");
+    Serial.println(fan_voltage);
+#endif
+
+    lastPrint = t;
+
+    // Update fan output
     analogWrite(PWM_OUT, output);
   }
 }
@@ -137,6 +147,7 @@ void checkPeriod(){
 
   // Detect falling edge
   if (state == LOW) {
+    //Serial.println("Edge!");
     unsigned long diff = now - lastEdgeTime;
     lastEdgeTime = now;
     //Serial.println("Tach Edge!");
@@ -165,6 +176,23 @@ void updateEncoder() {
   lastEncoded = encoded;
 }
 
+float PWMtoRPM(int pwm) {
+    const float a = 2.05e-3f;
+    const float C = 3.825f;
+    pwm = constrain(pwm, 1, 255);  // avoid log(0)
+    return constrain(log(pwm / C) / a, 0, MAX_RPM);
+}
+
+int RPMtoPWM(float rpm) {
+    const float a = 2.05e-3f;
+    const float C = 3.825f;   // 255*1.5/100
+    // Model: PWM = C * exp(a * rpm)
+    float pwm = C * exp(a * rpm);
+    // Limit range
+    pwm = constrain(pwm, 0.0f, 255.0f);
+    return (int)pwm;
+}
+
 double computePID(double setpoint, double measurement) {
   unsigned long now = micros();
   double dt = (now - pidPrevTime) / 1e6;  // convert µs → seconds
@@ -183,7 +211,7 @@ double computePID(double setpoint, double measurement) {
   pidPrevError = error;
 
   // PID output
-  double output = setpoint + (Kp * error) + (Ki * pidIntegral) + (Kd * derivative);
+  double output = (Kp * error) + (Ki * pidIntegral) + (Kd * derivative);
 
   return output;
 }
