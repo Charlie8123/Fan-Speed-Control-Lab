@@ -15,8 +15,8 @@
 // control vars
 double rpm, rpm_pwm, setpoint, output, fan_voltage;
 // PID Tunings — start with these and tune later
-double Kp = 12.0;
-double Ki = 0.4;
+double Kp = 2.0;
+double Ki = 0.0;
 double Kd = 0;
 // PID internal state
 double pidIntegral = 0;
@@ -90,10 +90,10 @@ void loop() {
   if (period > 0) rpm = 60000000.0 / (period * PULSES_PER_REV);
 
   // ----- STEP INPUT -----
-  // Step occurs at 5000 ms
+  // Step occurs at 10000 ms
   unsigned long t = millis();
-  if (t < 5000) setpoint = 0;     // initial level (pre-step)
-  if (t < 5000) rpm = 0;     // initial level (pre-step)
+  if (t < 10000) setpoint = 0;     // initial level (pre-step)
+  if (t < 10000) rpm = 0;     // initial level (pre-step)
   else setpoint = 155;             // post-step target
   // -----------------------
 
@@ -125,6 +125,11 @@ void loop() {
     Serial.print(rpm);      Serial.print(",");
     Serial.print(output);   Serial.print(",");
     Serial.println(fan_voltage);
+    // Serial.print(rpm);       Serial.print(",");
+    // Serial.print(setpoint_rpm);       Serial.print(",");
+    // Serial.print(pidOut); Serial.print(",");
+    // Serial.print(output); Serial.println(",");
+
 #endif
 
     lastPrint = t;
@@ -177,15 +182,15 @@ void updateEncoder() {
 }
 
 float PWMtoRPM(int pwm) {
-    const float a = 2.05e-3f;
-    const float C = 3.825f;
+    const float a = 3.26e-3f;
+    const float C = 0.59f;
     pwm = constrain(pwm, 1, 255);  // avoid log(0)
     return constrain(log(pwm / C) / a, 0, MAX_RPM);
 }
 
 int RPMtoPWM(float rpm) {
-    const float a = 2.05e-3f;
-    const float C = 3.825f;   // 255*1.5/100
+    const float a = 3.26e-3f;
+    const float C = 0.59f;
     // Model: PWM = C * exp(a * rpm)
     float pwm = C * exp(a * rpm);
     // Limit range
